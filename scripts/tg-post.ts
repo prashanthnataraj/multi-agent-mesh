@@ -16,8 +16,8 @@
 // Roles supported (must match keys in bots.json):
 //   pm, engineer, designer, researcher, tester, gtm
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -36,6 +36,11 @@ const DEDUP_MAX_ENTRIES = 200;
 const TEXT_CHUNK_LIMIT = 4096; // Telegram sendMessage hard limit
 const MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [1000, 2000, 4000];
+const REQUEST_TIMEOUT_MS = 30_000; // hard cap on a single Telegram API call
+
+// Bot-token shape is `<digits>:<base64url-ish 35+ chars>` per BotFather.
+// Used as a defensive sanity-check; a malformed token short-circuits the call.
+const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
 
 type BotName = "pm" | "engineer" | "designer" | "researcher" | "tester" | "gtm";
 
@@ -119,9 +124,13 @@ function loadDedup(): DedupEntry[] {
 }
 
 function saveDedup(entries: DedupEntry[]): void {
+  // Atomic write: write to .tmp then rename, so a SIGKILL mid-write never
+  // leaves a half-written JSON file that breaks the next call.
   mkdirSync(dirname(DEDUP_PATH), { recursive: true });
   const trimmed = entries.slice(-DEDUP_MAX_ENTRIES);
-  writeFileSync(DEDUP_PATH, JSON.stringify(trimmed));
+  const tmp = `${DEDUP_PATH}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  writeFileSync(tmp, JSON.stringify(trimmed));
+  renameSync(tmp, DEDUP_PATH);
 }
 
 export function dedupKey(
@@ -155,18 +164,43 @@ async function callTelegram<T = unknown>(
   method: string,
   body: FormData | Record<string, unknown>,
 ): Promise<T> {
+  if (!TOKEN_RE.test(token)) {
+    throw new Error(
+      `Token doesn't look like a BotFather token (\`<digits>:<35+ chars>\`). ` +
+        `Check secrets/bots.json — typo, leading whitespace, or stale token.`,
+    );
+  }
   const url = `https://api.telegram.org/bot${token}/${method}`;
-  const init: RequestInit =
-    body instanceof FormData
-      ? { method: "POST", body }
-      : {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        };
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const res = await fetch(url, init);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    const init: RequestInit =
+      body instanceof FormData
+        ? { method: "POST", body, signal: ctrl.signal }
+        : {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+          };
+
+    let res: Response;
+    try {
+      res = await fetch(url, init);
+    } catch (err) {
+      // Network error or AbortError (timeout). Retry unless we've used the budget.
+      if (attempt === MAX_RETRIES - 1) {
+        throw new Error(
+          `telegram ${method} network error after ${MAX_RETRIES} attempts: ${(err as Error).message}`,
+        );
+      }
+      await sleep(RETRY_DELAYS_MS[attempt] ?? 4000);
+      continue;
+    } finally {
+      clearTimeout(timer);
+    }
+
     if (res.ok) {
       const json = (await res.json()) as { ok: boolean; result: T; description?: string };
       if (!json.ok) throw new Error(json.description ?? `telegram ${method} !ok`);
@@ -181,6 +215,11 @@ async function callTelegram<T = unknown>(
           : RETRY_DELAYS_MS[attempt] ?? 4000;
       await sleep(waitMs);
       continue;
+    }
+    // 5xx is retryable; 4xx other than 429 is a hard error (don't burn retries).
+    if (res.status >= 400 && res.status < 500) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`telegram ${method} HTTP ${res.status}: ${errText}`);
     }
     const errText = await res.text().catch(() => "");
     if (attempt === MAX_RETRIES - 1) {

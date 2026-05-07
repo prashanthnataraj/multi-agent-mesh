@@ -1,0 +1,31 @@
+{
+  "name": "multi-agent-mesh",
+  "version": "0.1.0",
+  "description": "Claude Code Skill — wires up a multi-agent team coordinating through a shared Telegram group, one bot per role.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/prashanthnatraj/multi-agent-mesh.git"
+  },
+  "homepage": "https://github.com/prashanthnatraj/multi-agent-mesh",
+  "bugs": "https://github.com/prashanthnatraj/multi-agent-mesh/issues",
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "scripts": {
+    "poller": "bun scripts/tg-poller.ts",
+    "post": "bun scripts/tg-post.ts",
+    "start": "bash scripts/start-pm.sh",
+    "smoke": "bash scripts/smoke.sh"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  },
+  "keywords": [
+    "claude-code",
+    "claude-skill",
+    "telegram",
+    "multi-agent",
+    "agent-orchestration"
+  ]
+}

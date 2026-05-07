@@ -1,5 +1,6 @@
-# Real bot tokens — never commit
+# Real bot tokens + allowlist — never commit
 secrets/bots.json
+secrets/access.json
 
 # Local environment
 .env
@@ -8,6 +9,9 @@ secrets/bots.json
 
 # Dependencies
 node_modules/
+bun.lock
+bun.lockb
+package-lock.json
 
 # Build outputs
 dist/
@@ -27,7 +31,9 @@ Thumbs.db
 *.swp
 *~
 
-# Local poller state (per-machine)
+# Local poller state (per-machine; lives in ~/.claude/agent-mesh/ but
+# guard against accidentally committing if a user copies it into the repo)
 last-update.json
+poller.lock
 inbox/
 dedup.json

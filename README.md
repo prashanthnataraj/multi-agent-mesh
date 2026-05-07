@@ -8,13 +8,7 @@
 npx skills add prashanthnatraj/multi-agent-mesh
 ```
 
-That fetches `SKILL.md` from this repo and installs it into `~/.claude/skills/multi-agent-mesh/`. The Skill appears in your `/` slash menu next time you launch Claude Code. It bundles:
-
-- **`scripts/tg-poller.ts`** — long-poll Telegram daemon, writes inbox to `~/.claude/channels/telegram/inbox/`
-- **`scripts/tg-post.ts`** — outbound bot helper with dedup, chunking, 429 backoff
-- **`scripts/start-pm.sh`** — PM session bootstrap that detaches the poller via `nohup`
-- **`secrets/bots.json.example`** — template for 6-role bot config (PM, Engineer, Designer, Researcher, Tester, GTM)
-- **`SKILL.md`** — the full setup walkthrough (read this first)
+That fetches `SKILL.md` and the bundled assets into `~/.claude/skills/multi-agent-mesh/`. The Skill appears in your `/` slash menu next time you launch Claude Code.
 
 ## Or fork + clone manually
 
@@ -22,25 +16,38 @@ That fetches `SKILL.md` from this repo and installs it into `~/.claude/skills/mu
 git clone https://github.com/prashanthnatraj/multi-agent-mesh.git
 cd multi-agent-mesh
 cp secrets/bots.json.example secrets/bots.json
-# Edit secrets/bots.json with your real BotFather tokens
+cp secrets/access.json.example secrets/access.json
+# Edit both with your real BotFather tokens + chat_id (see docs/telegram-setup.md)
+bash scripts/smoke.sh
 bash scripts/start-pm.sh
 ```
 
-The full walkthrough is in [`SKILL.md`](./SKILL.md) — same content, two installation paths.
+The full walkthrough is in [`SKILL.md`](./SKILL.md). The BotFather walkthrough is in [`docs/telegram-setup.md`](./docs/telegram-setup.md).
 
 ## What it does
 
-Instead of agents prompt-passing inside one Claude Code session, each role gets its own Telegram bot in a shared group. The PM bot orchestrates; specialists (Engineer, Designer, Researcher, Tester, GTM) post critical updates back. Role tags survive quote-replies and forwards. The poller daemon runs detached so it keeps capturing messages even when you close the Claude Code terminal.
+Instead of agents prompt-passing inside one Claude Code session, each role gets its own Telegram bot in a shared group. The PM bot orchestrates; specialists (engineer, designer, researcher, tester, gtm) post critical updates back. Role tags survive quote-replies and forwards. The poller daemon runs detached so it keeps capturing messages even when you close the Claude Code terminal.
 
 ```
                   Telegram group (your team chat)
                               ▲
             ┌─────────┬───────┼───────┬─────────┐
             │         │       │       │         │
-        [PM bot]  [Research] [Design] [Eng]   [QA]   [GTM]
-            │         │       │       │         │     │
-            └─── Claude Code subagents (Task tool) ────┘
+        [pm bot] [researcher][designer][eng]  [tester] [gtm]
+            │         │       │       │         │       │
+            └─── Claude Code subagents (Task tool) ──────┘
 ```
+
+## What's in the box
+
+- **`scripts/tg-poller.ts`** — long-poll Telegram daemon. Atomic state writes, lockfile, signal-flush, token-shape validation. Writes inbox to `~/.claude/agent-mesh/inbox/YYYY-MM-DD/`.
+- **`scripts/tg-post.ts`** — outbound bot helper with dedup, chunking, 429 backoff, 30s request timeout.
+- **`scripts/start-pm.sh`** — PM session bootstrap. `nohup`-detaches the poller; survives shell exit.
+- **`scripts/smoke.sh`** — end-to-end setup verification (per-bot getMe, optional outbound test).
+- **`agents/{pm,engineer,designer,researcher,tester,gtm}.md`** — six pre-written agent specs ready to drop into `.claude/agents/`.
+- **`docs/telegram-setup.md`** — BotFather walkthrough (15 min, ten ordered steps, common pitfalls).
+- **`secrets/bots.json.example` + `secrets/access.json.example`** — templates for the two secret files. Both real files are gitignored.
+- **`package.json`** — npm script aliases (`poller`, `post`, `start`, `smoke`).
 
 ## Why Telegram
 
@@ -55,13 +62,12 @@ Instead of agents prompt-passing inside one Claude Code session, each role gets 
 
 - **Bun** (https://bun.sh) — TypeScript runtime, no build step
 - **Claude Code** (https://claude.com/claude-code) — the agent runtime
-- **A Telegram account + 5 minutes for BotFather**
+- **A Telegram account + 15 minutes for BotFather** ([guide](./docs/telegram-setup.md))
+- **macOS, Linux, or Windows via WSL2.** Native Windows PowerShell isn't supported (the bash entry-point scripts use `nohup`/`disown`).
 
 ## Status
 
-This is the sanitized public distillation of a pattern in production at [Lume AI](https://getlumeai.com). The `SKILL.md` walks through the full setup; the scripts are battle-tested.
-
-The 6 default agent role specs (PM, Engineer, Designer, Researcher, Tester, GTM) ship as a follow-up. For now, customize the role list in `secrets/bots.json` — the scripts work with any subset.
+This is the sanitized public distillation of a pattern in production at [Lume AI](https://getlumeai.com). The scripts are battle-tested across daily-use sessions; the included agent specs are sanitized derivatives of the same specs running in the source project.
 
 Issues, PRs, and feedback welcome.
 

@@ -23,11 +23,14 @@ import {
   mkdirSync,
   existsSync,
   appendFileSync,
+  renameSync,
+  unlinkSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -43,6 +46,8 @@ const STATE_DIR = `${HOME}/.claude/agent-mesh`;
 const STATE_PATH = `${STATE_DIR}/last-update.json`;
 const INBOX_ROOT = `${STATE_DIR}/inbox`;
 const LOG_PATH = `${STATE_DIR}/poller.log`;
+const LOCK_PATH = `${STATE_DIR}/poller.lock`;
+const LOCK_STALE_SEC = 90; // poller heartbeats lock; staler than this = orphaned
 
 const LONG_POLL_TIMEOUT_SEC = 25;
 const BATCH_LIMIT = 20;
@@ -112,6 +117,8 @@ function log(level: "DEBUG" | "INFO" | "ERROR", msg: string): void {
 
 // ── Config loading ───────────────────────────────────────────────────────────
 
+const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
+
 function loadToken(): string {
   if (!existsSync(SECRETS_PATH)) {
     throw new Error(
@@ -120,8 +127,15 @@ function loadToken(): string {
     );
   }
   const j = JSON.parse(readFileSync(SECRETS_PATH, "utf8"));
-  if (j?.pm?.token) return j.pm.token as string;
-  throw new Error(`No 'pm' bot token in ${SECRETS_PATH}`);
+  const tok = j?.pm?.token as string | undefined;
+  if (!tok) throw new Error(`No 'pm' bot token in ${SECRETS_PATH}`);
+  if (tok.includes("REPLACE_WITH_") || !TOKEN_RE.test(tok)) {
+    throw new Error(
+      `'pm' token in ${SECRETS_PATH} doesn't look like a real BotFather token. ` +
+        `Expected \`<digits>:<35+ chars>\`. Did you forget to fill in the example file?`,
+    );
+  }
+  return tok;
 }
 
 function loadAllowlist(): {
@@ -165,8 +179,76 @@ function loadLastUpdateId(): number {
 }
 
 function saveLastUpdateId(id: number): void {
+  // Atomic write: tmp file then rename. A SIGKILL mid-write would otherwise
+  // leave a half-written state file that loses the offset on next start.
   mkdirSync(dirname(STATE_PATH), { recursive: true });
-  writeFileSync(STATE_PATH, JSON.stringify({ lastUpdateId: id }) + "\n", "utf8");
+  const tmp = `${STATE_PATH}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ lastUpdateId: id }) + "\n", "utf8");
+  renameSync(tmp, STATE_PATH);
+}
+
+// ── Lockfile (single-poller invariant) ───────────────────────────────────────
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireLock(): { acquired: boolean; reason?: string } {
+  mkdirSync(dirname(LOCK_PATH), { recursive: true });
+  if (existsSync(LOCK_PATH)) {
+    try {
+      const raw = JSON.parse(readFileSync(LOCK_PATH, "utf8")) as {
+        pid: number;
+        ts: number;
+      };
+      const ageSec = Math.floor(Date.now() / 1000) - (raw.ts ?? 0);
+      if (raw.pid && isProcessAlive(raw.pid) && ageSec < LOCK_STALE_SEC) {
+        return {
+          acquired: false,
+          reason: `another poller is alive (pid=${raw.pid}, lock_age=${ageSec}s). Run \`pkill -f tg-poller\` to reset.`,
+        };
+      }
+      // Stale or dead — overwrite.
+    } catch {
+      // Malformed lock file, treat as stale.
+    }
+  }
+  const tmp = `${LOCK_PATH}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  writeFileSync(
+    tmp,
+    JSON.stringify({ pid: process.pid, ts: Math.floor(Date.now() / 1000) }) + "\n",
+    "utf8",
+  );
+  renameSync(tmp, LOCK_PATH);
+  return { acquired: true };
+}
+
+function heartbeatLock(): void {
+  try {
+    writeFileSync(
+      LOCK_PATH,
+      JSON.stringify({ pid: process.pid, ts: Math.floor(Date.now() / 1000) }) + "\n",
+      "utf8",
+    );
+  } catch {
+    // best-effort
+  }
+}
+
+function releaseLock(): void {
+  try {
+    if (existsSync(LOCK_PATH)) {
+      const raw = JSON.parse(readFileSync(LOCK_PATH, "utf8")) as { pid: number };
+      if (raw.pid === process.pid) unlinkSync(LOCK_PATH);
+    }
+  } catch {
+    // best-effort
+  }
 }
 
 // ── Inbox writer ─────────────────────────────────────────────────────────────
@@ -207,10 +289,15 @@ function extractAttachment(msg: TgMessage): InboxEntry["attachment"] | undefined
 }
 
 function writeInboxEntry(entry: InboxEntry): string {
+  // Atomic write: agent processes drain the inbox dir; a half-written .json
+  // would parse-fail and stall the drain. tmp + rename guarantees the agent
+  // only ever sees fully-formed files.
   const dir = inboxDirForToday();
   mkdirSync(dir, { recursive: true });
   const path = `${dir}/${entry.update_id}.json`;
-  writeFileSync(path, JSON.stringify(entry, null, 2) + "\n", "utf8");
+  const tmp = `${dir}/.${entry.update_id}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(entry, null, 2) + "\n", "utf8");
+  renameSync(tmp, path);
   return path;
 }
 
@@ -343,11 +430,21 @@ async function main(): Promise<void> {
 
   log("INFO", `tg-poller starting (pid=${process.pid})`);
 
+  // Lockfile — refuse to start if another poller is already alive. Two pollers
+  // on the same bot race for getUpdates with HTTP 409, plus duplicate inbox
+  // writes; cleaner to fail fast here.
+  const lock = acquireLock();
+  if (!lock.acquired) {
+    log("ERROR", `Lock acquisition failed: ${lock.reason}`);
+    process.exit(2);
+  }
+
   let token: string;
   try {
     token = loadToken();
   } catch (err) {
     log("ERROR", (err as Error).message);
+    releaseLock();
     process.exit(1);
   }
   const allowlist = loadAllowlist();
@@ -362,7 +459,12 @@ async function main(): Promise<void> {
   let stopping = false;
   const onSignal = (signal: NodeJS.Signals) => {
     log("INFO", `Received ${signal} — flushing state and exiting`);
-    saveLastUpdateId(lastUpdateId);
+    try {
+      saveLastUpdateId(lastUpdateId);
+    } catch (err) {
+      log("ERROR", `Failed to flush state on shutdown: ${(err as Error).message}`);
+    }
+    releaseLock();
     stopping = true;
     process.exit(0);
   };
@@ -372,6 +474,7 @@ async function main(): Promise<void> {
   let backoffIdx = 0;
 
   while (!stopping) {
+    heartbeatLock(); // refresh ts on every iteration so a real poller never looks stale
     log("DEBUG", `Polling getUpdates offset=${lastUpdateId + 1}`);
     const result = await pollOnce(token, lastUpdateId + 1);
 
@@ -430,6 +533,7 @@ function sleep(ms: number): Promise<void> {
 if (import.meta.main) {
   main().catch((err) => {
     log("ERROR", `Fatal: ${(err as Error).stack ?? err}`);
+    releaseLock();
     process.exit(1);
   });
 }

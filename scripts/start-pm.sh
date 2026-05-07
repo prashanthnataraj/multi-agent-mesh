@@ -26,10 +26,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Inbox + log paths
-INBOX_DIR="$HOME/.claude/channels/telegram/inbox"
-POLLER_LOG="$HOME/.claude/channels/telegram/poller.log"
-mkdir -p "$INBOX_DIR" "$(dirname "$POLLER_LOG")"
+# Inbox + log paths (must match tg-poller.ts STATE_DIR/INBOX_ROOT/LOG_PATH)
+STATE_DIR="$HOME/.claude/agent-mesh"
+INBOX_DIR="$STATE_DIR/inbox"
+POLLER_LOG="$STATE_DIR/poller.log"
+mkdir -p "$INBOX_DIR" "$STATE_DIR"
 
 # Verify bots.json exists
 BOTS_JSON="$REPO_ROOT/secrets/bots.json"
