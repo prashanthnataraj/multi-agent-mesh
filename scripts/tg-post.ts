@@ -29,18 +29,23 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = process.env.AGENT_MESH_ROOT
   ? resolve(process.env.AGENT_MESH_ROOT)
   : resolve(SCRIPT_DIR, "..");
-const SECRETS_PATH = `${REPO_ROOT}/secrets/bots.json`;
-const DEDUP_PATH = `${homedir()}/.claude/agent-mesh/dedup.json`;
-const DEDUP_TTL_SEC = 60; // retry window, not idempotency window
+export const SECRETS_PATH = `${REPO_ROOT}/secrets/bots.json`;
+// `AGENT_MESH_HOME` overrides where dedup state lives — defaults to
+// ~/.claude/agent-mesh/dedup.json. Used by tests for isolation.
+const STATE_HOME = process.env.AGENT_MESH_HOME
+  ? resolve(process.env.AGENT_MESH_HOME)
+  : `${homedir()}/.claude/agent-mesh`;
+export const DEDUP_PATH = `${STATE_HOME}/dedup.json`;
+export const DEDUP_TTL_SEC = 60; // retry window, not idempotency window
 const DEDUP_MAX_ENTRIES = 200;
 const TEXT_CHUNK_LIMIT = 4096; // Telegram sendMessage hard limit
-const MAX_RETRIES = 3;
+export const MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [1000, 2000, 4000];
 const REQUEST_TIMEOUT_MS = 30_000; // hard cap on a single Telegram API call
 
 // Bot-token shape is `<digits>:<base64url-ish 35+ chars>` per BotFather.
 // Used as a defensive sanity-check; a malformed token short-circuits the call.
-const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
+export const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
 
 type BotName = "pm" | "engineer" | "designer" | "researcher" | "tester" | "gtm";
 
@@ -98,7 +103,7 @@ function die(msg: string, code = 1): never {
   process.exit(code);
 }
 
-function loadBots(): BotsFile {
+export function loadBots(): BotsFile {
   if (!existsSync(SECRETS_PATH)) {
     die(
       `Secrets file not found at ${SECRETS_PATH}. ` +
@@ -113,7 +118,7 @@ function loadBots(): BotsFile {
   }
 }
 
-function loadDedup(): DedupEntry[] {
+export function loadDedup(): DedupEntry[] {
   if (!existsSync(DEDUP_PATH)) return [];
   try {
     const raw = JSON.parse(readFileSync(DEDUP_PATH, "utf-8"));
@@ -123,7 +128,7 @@ function loadDedup(): DedupEntry[] {
   }
 }
 
-function saveDedup(entries: DedupEntry[]): void {
+export function saveDedup(entries: DedupEntry[]): void {
   // Atomic write: write to .tmp then rename, so a SIGKILL mid-write never
   // leaves a half-written JSON file that breaks the next call.
   mkdirSync(dirname(DEDUP_PATH), { recursive: true });
@@ -159,10 +164,11 @@ export function chunkText(text: string, limit = TEXT_CHUNK_LIMIT): string[] {
 
 // ── Telegram API ─────────────────────────────────────────────────────────────
 
-async function callTelegram<T = unknown>(
+export async function callTelegram<T = unknown>(
   token: string,
   method: string,
   body: FormData | Record<string, unknown>,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<T> {
   if (!TOKEN_RE.test(token)) {
     throw new Error(
@@ -187,7 +193,7 @@ async function callTelegram<T = unknown>(
 
     let res: Response;
     try {
-      res = await fetch(url, init);
+      res = await fetchImpl(url, init);
     } catch (err) {
       // Network error or AbortError (timeout). Retry unless we've used the budget.
       if (attempt === MAX_RETRIES - 1) {
@@ -236,13 +242,16 @@ function sleep(ms: number): Promise<void> {
 
 // ── Post entry point ─────────────────────────────────────────────────────────
 
-export async function tgPost(args: {
-  botName: BotName;
-  chatId: string;
-  text: string;
-  file?: string;
-  replyTo?: number;
-}): Promise<PostResult> {
+export async function tgPost(
+  args: {
+    botName: BotName;
+    chatId: string;
+    text: string;
+    file?: string;
+    replyTo?: number;
+  },
+  fetchImpl: typeof fetch = fetch,
+): Promise<PostResult> {
   // Clean rollback: TG_POST_ENABLED=0 makes the helper a no-op.
   if (process.env.TG_POST_ENABLED === "0") {
     return { message_id: -1, deduped: false };
@@ -281,6 +290,7 @@ export async function tgPost(args: {
       entry.token,
       "sendMessage",
       body,
+      fetchImpl,
     );
     return result.message_id;
   };
@@ -303,7 +313,12 @@ export async function tgPost(args: {
     const filename = args.file.split("/").pop() ?? "attachment";
     const isImage = /\.(jpe?g|png|gif|webp)$/i.test(filename);
     fd.append(isImage ? "photo" : "document", blob, filename);
-    await callTelegram(entry.token, isImage ? "sendPhoto" : "sendDocument", fd);
+    await callTelegram(
+      entry.token,
+      isImage ? "sendPhoto" : "sendDocument",
+      fd,
+      fetchImpl,
+    );
   }
 
   cache.push({ key, message_id: messageId, ts: now });
