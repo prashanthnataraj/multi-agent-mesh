@@ -1,0 +1,33 @@
+# Real bot tokens — never commit
+secrets/bots.json
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# Logs
+*.log
+poller.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local poller state (per-machine)
+last-update.json
+inbox/
+dedup.json
