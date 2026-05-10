@@ -87,18 +87,17 @@ describe("smoke.sh", () => {
     expect(combined).not.toContain("UnhandledPromiseRejection");
   });
 
-  test("malformed bots.json → smoke.sh runs without crash (KNOWN BUG: JSON-parse gate is silent)", () => {
-    // BUG (caught by this test): smoke.sh's `bun -e "JSON.parse(...)"` JSON-validity
-    // gate silently exits 0 when the inner require()-wrapped JSON.parse throws.
-    // Repro: `bun -e "JSON.parse(require('fs').readFileSync('bad.json','utf8'))"; echo $?`
-    // → 0 (should be 1). The script then falls through to the per-bot loop.
-    // Tracked separately — this PR documents the gap, doesn't fix it.
+  test("malformed bots.json → exits 1 with 'not valid JSON' message", () => {
+    // Wrapping the JSON.parse in try/catch + process.exit(1) is required because
+    // `bun -e` swallows top-level throws from require()-wrapped calls and exits 0
+    // on parse error (verified on bun 1.x). See smoke.sh comment for context.
     writeFileSync(join(repoCopy, "secrets/bots.json"), "{not valid json", "utf8");
     const r = runSmoke();
     const combined = r.stdout + r.stderr;
+    expect(r.code).toBe(1);
+    expect(combined).toContain("not valid JSON");
     expect(combined).not.toContain("UnhandledPromiseRejection");
     expect(combined).not.toContain("at Object.");
-    // Once the bug is fixed, swap to: expect(r.code).toBe(1) + "not valid JSON" assertion.
   });
 
   test("valid-shape tokens but unreachable getMe → fails getMe per role with hint", () => {
