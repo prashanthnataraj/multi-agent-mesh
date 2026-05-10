@@ -59,8 +59,10 @@ if [ ! -f "$BOTS_JSON" ]; then
   exit 1
 fi
 
-# Validate JSON shape with bun (don't depend on jq being installed)
-if ! bun -e "JSON.parse(require('fs').readFileSync('$BOTS_JSON','utf8'))" >/dev/null 2>&1; then
+# Validate JSON shape with bun (don't depend on jq being installed).
+# NOTE: explicit try/catch + process.exit(1) is required — `bun -e` swallows
+# top-level throws from `require()`-wrapped calls and exits 0 on parse error.
+if ! bun -e "try { JSON.parse(require('fs').readFileSync('$BOTS_JSON','utf8')) } catch (e) { console.error(e.message); process.exit(1) }" >/dev/null 2>&1; then
   fail "secrets/bots.json is not valid JSON"
   info "Re-edit the file. Common cause: trailing comma or unquoted key."
   exit 1
