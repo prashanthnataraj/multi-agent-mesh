@@ -15,6 +15,8 @@
 // Environment:
 //   AGENT_MESH_ROOT — absolute path to the directory containing secrets/bots.json
 //                     Defaults to the parent dir of this script.
+//   AGENT_MESH_HOME — absolute path to state dir (lock, last-update.json, inbox).
+//                     Defaults to ~/.claude/agent-mesh. Used by tests.
 //   AGENT_MESH_DEBUG=1 — verbose logging
 
 import {
@@ -34,20 +36,42 @@ import { randomBytes } from "node:crypto";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const HOME = homedir();
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = process.env.AGENT_MESH_ROOT
-  ? resolve(process.env.AGENT_MESH_ROOT)
-  : resolve(SCRIPT_DIR, "..");
-const SECRETS_PATH = `${REPO_ROOT}/secrets/bots.json`;
-const ACCESS_PATH = `${REPO_ROOT}/secrets/access.json`;
+export type Paths = {
+  REPO_ROOT: string;
+  SECRETS_PATH: string;
+  ACCESS_PATH: string;
+  STATE_DIR: string;
+  STATE_PATH: string;
+  INBOX_ROOT: string;
+  LOG_PATH: string;
+  LOCK_PATH: string;
+};
 
-const STATE_DIR = `${HOME}/.claude/agent-mesh`;
-const STATE_PATH = `${STATE_DIR}/last-update.json`;
-const INBOX_ROOT = `${STATE_DIR}/inbox`;
-const LOG_PATH = `${STATE_DIR}/poller.log`;
-const LOCK_PATH = `${STATE_DIR}/poller.lock`;
-const LOCK_STALE_SEC = 90; // poller heartbeats lock; staler than this = orphaned
+// Path resolution: each helper takes paths explicitly (test seam). The
+// `getPaths()` factory wraps the CLI default — `~/.claude/agent-mesh` for
+// state and the script's parent dir for the repo root, both overrideable via
+// AGENT_MESH_HOME / AGENT_MESH_ROOT env vars.
+export function getPaths(env: NodeJS.ProcessEnv = process.env): Paths {
+  const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+  const REPO_ROOT = env.AGENT_MESH_ROOT
+    ? resolve(env.AGENT_MESH_ROOT)
+    : resolve(SCRIPT_DIR, "..");
+  const STATE_DIR = env.AGENT_MESH_HOME
+    ? resolve(env.AGENT_MESH_HOME)
+    : `${homedir()}/.claude/agent-mesh`;
+  return {
+    REPO_ROOT,
+    SECRETS_PATH: `${REPO_ROOT}/secrets/bots.json`,
+    ACCESS_PATH: `${REPO_ROOT}/secrets/access.json`,
+    STATE_DIR,
+    STATE_PATH: `${STATE_DIR}/last-update.json`,
+    INBOX_ROOT: `${STATE_DIR}/inbox`,
+    LOG_PATH: `${STATE_DIR}/poller.log`,
+    LOCK_PATH: `${STATE_DIR}/poller.lock`,
+  };
+}
+
+export const LOCK_STALE_SEC = 90; // poller heartbeats lock; staler than this = orphaned
 
 const LONG_POLL_TIMEOUT_SEC = 25;
 const BATCH_LIMIT = 20;
@@ -68,14 +92,14 @@ type AccessFile = {
   allowedGroups?: string[];
 };
 
-type TgUpdate = {
+export type TgUpdate = {
   update_id: number;
   message?: TgMessage;
   edited_message?: TgMessage;
   channel_post?: TgMessage;
 };
 
-type TgMessage = {
+export type TgMessage = {
   message_id: number;
   date: number;
   from?: { id: number; username?: string; first_name?: string };
@@ -90,7 +114,7 @@ type TgMessage = {
   video?: { file_id: string; mime_type?: string };
 };
 
-type InboxEntry = {
+export type InboxEntry = {
   update_id: number;
   message_id: number;
   chat_id: number;
@@ -103,13 +127,19 @@ type InboxEntry = {
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 
-function log(level: "DEBUG" | "INFO" | "ERROR", msg: string): void {
+function log(
+  level: "DEBUG" | "INFO" | "ERROR",
+  msg: string,
+  logPath?: string,
+): void {
   if (level === "DEBUG" && !DEBUG) return;
   const line = `${new Date().toISOString()} [${level}] ${msg}\n`;
-  try {
-    appendFileSync(LOG_PATH, line);
-  } catch {
-    // best-effort
+  if (logPath) {
+    try {
+      appendFileSync(logPath, line);
+    } catch {
+      // best-effort
+    }
   }
   if (level === "ERROR") process.stderr.write(line);
   else process.stdout.write(line);
@@ -117,43 +147,43 @@ function log(level: "DEBUG" | "INFO" | "ERROR", msg: string): void {
 
 // ── Config loading ───────────────────────────────────────────────────────────
 
-const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
+export const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
 
-function loadToken(): string {
-  if (!existsSync(SECRETS_PATH)) {
+export function loadToken(secretsPath: string): string {
+  if (!existsSync(secretsPath)) {
     throw new Error(
-      `No secrets file at ${SECRETS_PATH}. ` +
+      `No secrets file at ${secretsPath}. ` +
         `Copy secrets/bots.json.example → secrets/bots.json and fill in tokens.`,
     );
   }
-  const j = JSON.parse(readFileSync(SECRETS_PATH, "utf8"));
+  const j = JSON.parse(readFileSync(secretsPath, "utf8"));
   const tok = j?.pm?.token as string | undefined;
-  if (!tok) throw new Error(`No 'pm' bot token in ${SECRETS_PATH}`);
+  if (!tok) throw new Error(`No 'pm' bot token in ${secretsPath}`);
   if (tok.includes("REPLACE_WITH_") || !TOKEN_RE.test(tok)) {
     throw new Error(
-      `'pm' token in ${SECRETS_PATH} doesn't look like a real BotFather token. ` +
+      `'pm' token in ${secretsPath} doesn't look like a real BotFather token. ` +
         `Expected \`<digits>:<35+ chars>\`. Did you forget to fill in the example file?`,
     );
   }
   return tok;
 }
 
-function loadAllowlist(): {
+export function loadAllowlist(accessPath: string): {
   users: Set<string>;
   groups: Set<string>;
 } {
   const users = new Set<string>();
   const groups = new Set<string>();
-  if (!existsSync(ACCESS_PATH)) {
+  if (!existsSync(accessPath)) {
     log(
       "ERROR",
-      `access.json missing at ${ACCESS_PATH} — no chat will pass filter. ` +
+      `access.json missing at ${accessPath} — no chat will pass filter. ` +
         `Create it with shape: {"allowedUsers": ["123456"], "allowedGroups": ["-1001234567890"]}`,
     );
     return { users, groups };
   }
   try {
-    const j = JSON.parse(readFileSync(ACCESS_PATH, "utf8")) as AccessFile;
+    const j = JSON.parse(readFileSync(accessPath, "utf8")) as AccessFile;
     for (const id of j.allowedUsers ?? []) users.add(String(id));
     for (const id of j.allowedGroups ?? []) groups.add(String(id));
   } catch (err) {
@@ -162,10 +192,10 @@ function loadAllowlist(): {
   return { users, groups };
 }
 
-function loadLastUpdateId(): number {
-  if (!existsSync(STATE_PATH)) return 0;
+export function loadLastUpdateId(statePath: string): number {
+  if (!existsSync(statePath)) return 0;
   try {
-    const raw = readFileSync(STATE_PATH, "utf8").trim();
+    const raw = readFileSync(statePath, "utf8").trim();
     if (!raw) return 0;
     if (/^-?\d+$/.test(raw)) return Number(raw);
     const j = JSON.parse(raw);
@@ -173,23 +203,26 @@ function loadLastUpdateId(): number {
     if (typeof j?.lastUpdateId === "number") return j.lastUpdateId;
     return 0;
   } catch (err) {
-    log("ERROR", `Failed to parse ${STATE_PATH}: ${(err as Error).message} — starting from 0`);
+    log(
+      "ERROR",
+      `Failed to parse ${statePath}: ${(err as Error).message} — starting from 0`,
+    );
     return 0;
   }
 }
 
-function saveLastUpdateId(id: number): void {
+export function saveLastUpdateId(statePath: string, id: number): void {
   // Atomic write: tmp file then rename. A SIGKILL mid-write would otherwise
   // leave a half-written state file that loses the offset on next start.
-  mkdirSync(dirname(STATE_PATH), { recursive: true });
-  const tmp = `${STATE_PATH}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  mkdirSync(dirname(statePath), { recursive: true });
+  const tmp = `${statePath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   writeFileSync(tmp, JSON.stringify({ lastUpdateId: id }) + "\n", "utf8");
-  renameSync(tmp, STATE_PATH);
+  renameSync(tmp, statePath);
 }
 
 // ── Lockfile (single-poller invariant) ───────────────────────────────────────
 
-function isProcessAlive(pid: number): boolean {
+export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -198,16 +231,22 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-function acquireLock(): { acquired: boolean; reason?: string } {
-  mkdirSync(dirname(LOCK_PATH), { recursive: true });
-  if (existsSync(LOCK_PATH)) {
+export function acquireLock(
+  lockPath: string,
+  opts: { now?: number; pid?: number; isAlive?: (pid: number) => boolean } = {},
+): { acquired: boolean; reason?: string } {
+  const nowSec = opts.now ?? Math.floor(Date.now() / 1000);
+  const myPid = opts.pid ?? process.pid;
+  const isAlive = opts.isAlive ?? isProcessAlive;
+  mkdirSync(dirname(lockPath), { recursive: true });
+  if (existsSync(lockPath)) {
     try {
-      const raw = JSON.parse(readFileSync(LOCK_PATH, "utf8")) as {
+      const raw = JSON.parse(readFileSync(lockPath, "utf8")) as {
         pid: number;
         ts: number;
       };
-      const ageSec = Math.floor(Date.now() / 1000) - (raw.ts ?? 0);
-      if (raw.pid && isProcessAlive(raw.pid) && ageSec < LOCK_STALE_SEC) {
+      const ageSec = nowSec - (raw.ts ?? 0);
+      if (raw.pid && isAlive(raw.pid) && ageSec < LOCK_STALE_SEC) {
         return {
           acquired: false,
           reason: `another poller is alive (pid=${raw.pid}, lock_age=${ageSec}s). Run \`pkill -f tg-poller\` to reset.`,
@@ -218,21 +257,22 @@ function acquireLock(): { acquired: boolean; reason?: string } {
       // Malformed lock file, treat as stale.
     }
   }
-  const tmp = `${LOCK_PATH}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  const tmp = `${lockPath}.${myPid}.${randomBytes(4).toString("hex")}.tmp`;
   writeFileSync(
     tmp,
-    JSON.stringify({ pid: process.pid, ts: Math.floor(Date.now() / 1000) }) + "\n",
+    JSON.stringify({ pid: myPid, ts: nowSec }) + "\n",
     "utf8",
   );
-  renameSync(tmp, LOCK_PATH);
+  renameSync(tmp, lockPath);
   return { acquired: true };
 }
 
-function heartbeatLock(): void {
+export function heartbeatLock(lockPath: string): void {
   try {
     writeFileSync(
-      LOCK_PATH,
-      JSON.stringify({ pid: process.pid, ts: Math.floor(Date.now() / 1000) }) + "\n",
+      lockPath,
+      JSON.stringify({ pid: process.pid, ts: Math.floor(Date.now() / 1000) }) +
+        "\n",
       "utf8",
     );
   } catch {
@@ -240,11 +280,11 @@ function heartbeatLock(): void {
   }
 }
 
-function releaseLock(): void {
+export function releaseLock(lockPath: string): void {
   try {
-    if (existsSync(LOCK_PATH)) {
-      const raw = JSON.parse(readFileSync(LOCK_PATH, "utf8")) as { pid: number };
-      if (raw.pid === process.pid) unlinkSync(LOCK_PATH);
+    if (existsSync(lockPath)) {
+      const raw = JSON.parse(readFileSync(lockPath, "utf8")) as { pid: number };
+      if (raw.pid === process.pid) unlinkSync(lockPath);
     }
   } catch {
     // best-effort
@@ -253,19 +293,18 @@ function releaseLock(): void {
 
 // ── Inbox writer ─────────────────────────────────────────────────────────────
 
-function inboxDirForToday(): string {
+export function inboxDirForToday(inboxRoot: string, now: Date = new Date()): string {
   // Local-machine timezone — agents reading the inbox infer date from
   // file ts inside each entry, not the directory name.
-  const now = new Date();
   const ymd = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(
     now.getDate(),
   ).padStart(2, "0")}`;
-  return `${INBOX_ROOT}/${ymd}`;
+  return `${inboxRoot}/${ymd}`;
 }
 
-function extractAttachment(msg: TgMessage): InboxEntry["attachment"] | undefined {
+export function extractAttachment(msg: TgMessage): InboxEntry["attachment"] | undefined {
   if (msg.photo && msg.photo.length > 0) {
-    const largest = msg.photo[msg.photo.length - 1];
+    const largest = msg.photo[msg.photo.length - 1]!;
     return { kind: "photo", file_id: largest.file_id };
   }
   if (msg.document) {
@@ -288,11 +327,11 @@ function extractAttachment(msg: TgMessage): InboxEntry["attachment"] | undefined
   return undefined;
 }
 
-function writeInboxEntry(entry: InboxEntry): string {
+export function writeInboxEntry(inboxRoot: string, entry: InboxEntry): string {
   // Atomic write: agent processes drain the inbox dir; a half-written .json
   // would parse-fail and stall the drain. tmp + rename guarantees the agent
   // only ever sees fully-formed files.
-  const dir = inboxDirForToday();
+  const dir = inboxDirForToday(inboxRoot);
   mkdirSync(dir, { recursive: true });
   const path = `${dir}/${entry.update_id}.json`;
   const tmp = `${dir}/.${entry.update_id}.${process.pid}.tmp`;
@@ -321,7 +360,7 @@ function notify(title: string, body: string): void {
 
 // ── Allowlist filter — bot-loop protection ──────────────────────────────────
 
-function isAllowlisted(
+export function isAllowlisted(
   msg: TgMessage,
   allowlist: { users: Set<string>; groups: Set<string> },
 ): boolean {
@@ -336,10 +375,14 @@ function isAllowlisted(
 
 // ── Core poll loop ───────────────────────────────────────────────────────────
 
-async function pollOnce(
+export type PollStatus = "ok" | "conflict" | "auth" | "error";
+
+export async function pollOnce(
   token: string,
   offset: number,
-): Promise<{ status: "ok" | "conflict" | "auth" | "error"; updates: TgUpdate[] }> {
+  opts: { logPath?: string; fetchImpl?: typeof fetch } = {},
+): Promise<{ status: PollStatus; updates: TgUpdate[] }> {
+  const fetchFn = opts.fetchImpl ?? fetch;
   const url =
     `https://api.telegram.org/bot${token}/getUpdates` +
     `?offset=${offset}&timeout=${LONG_POLL_TIMEOUT_SEC}&limit=${BATCH_LIMIT}`;
@@ -348,37 +391,45 @@ async function pollOnce(
   const timer = setTimeout(() => ctrl.abort(), fetchTimeoutMs);
   let res: Response;
   try {
-    res = await fetch(url, { signal: ctrl.signal });
+    res = await fetchFn(url, { signal: ctrl.signal });
   } catch (err) {
-    log("ERROR", `Network error: ${(err as Error).message}`);
+    log("ERROR", `Network error: ${(err as Error).message}`, opts.logPath);
     return { status: "error", updates: [] };
   } finally {
     clearTimeout(timer);
   }
   if (res.status === 401) {
     const body = await safeText(res);
-    log("ERROR", `HTTP 401 (bad token). Body: ${body.slice(0, 200)}`);
+    log("ERROR", `HTTP 401 (bad token). Body: ${body.slice(0, 200)}`, opts.logPath);
     return { status: "auth", updates: [] };
   }
   if (res.status === 409) {
     const body = await safeText(res);
-    log("ERROR", `HTTP 409 (conflict — another consumer polling). Body: ${body.slice(0, 200)}`);
+    log(
+      "ERROR",
+      `HTTP 409 (conflict — another consumer polling). Body: ${body.slice(0, 200)}`,
+      opts.logPath,
+    );
     return { status: "conflict", updates: [] };
   }
   if (!res.ok) {
     const body = await safeText(res);
-    log("ERROR", `HTTP ${res.status}: ${body.slice(0, 200)}`);
+    log("ERROR", `HTTP ${res.status}: ${body.slice(0, 200)}`, opts.logPath);
     return { status: "error", updates: [] };
   }
   let json: { ok: boolean; result?: TgUpdate[]; description?: string };
   try {
     json = (await res.json()) as typeof json;
   } catch (err) {
-    log("ERROR", `Failed to parse JSON response: ${(err as Error).message}`);
+    log(
+      "ERROR",
+      `Failed to parse JSON response: ${(err as Error).message}`,
+      opts.logPath,
+    );
     return { status: "error", updates: [] };
   }
   if (!json.ok) {
-    log("ERROR", `Telegram API error: ${json.description ?? "unknown"}`);
+    log("ERROR", `Telegram API error: ${json.description ?? "unknown"}`, opts.logPath);
     return { status: "error", updates: [] };
   }
   return { status: "ok", updates: json.result ?? [] };
@@ -392,23 +443,10 @@ async function safeText(res: Response): Promise<string> {
   }
 }
 
-function processUpdate(
-  update: TgUpdate,
-  allowlist: { users: Set<string>; groups: Set<string> },
-): { written: boolean; path?: string; entry?: InboxEntry } {
+export function buildInboxEntry(update: TgUpdate): InboxEntry | null {
   const msg = update.message ?? update.edited_message ?? update.channel_post;
-  if (!msg) {
-    log("DEBUG", `update_id=${update.update_id} has no message body — skipping`);
-    return { written: false };
-  }
-  if (!isAllowlisted(msg, allowlist)) {
-    log(
-      "DEBUG",
-      `update_id=${update.update_id} not allowlisted (chat=${msg.chat.id}, user=${msg.from?.id}) — skipping`,
-    );
-    return { written: false };
-  }
-  const entry: InboxEntry = {
+  if (!msg) return null;
+  return {
     update_id: update.update_id,
     message_id: msg.message_id,
     chat_id: msg.chat.id,
@@ -418,53 +456,89 @@ function processUpdate(
     reply_to_message_id: msg.reply_to_message?.message_id,
     attachment: extractAttachment(msg),
   };
-  const path = writeInboxEntry(entry);
+}
+
+export function processUpdate(
+  update: TgUpdate,
+  allowlist: { users: Set<string>; groups: Set<string> },
+  inboxRoot: string,
+  logPath?: string,
+): { written: boolean; path?: string; entry?: InboxEntry } {
+  const msg = update.message ?? update.edited_message ?? update.channel_post;
+  if (!msg) {
+    log(
+      "DEBUG",
+      `update_id=${update.update_id} has no message body — skipping`,
+      logPath,
+    );
+    return { written: false };
+  }
+  if (!isAllowlisted(msg, allowlist)) {
+    log(
+      "DEBUG",
+      `update_id=${update.update_id} not allowlisted (chat=${msg.chat.id}, user=${msg.from?.id}) — skipping`,
+      logPath,
+    );
+    return { written: false };
+  }
+  const entry = buildInboxEntry(update)!;
+  const path = writeInboxEntry(inboxRoot, entry);
   return { written: true, path, entry };
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  mkdirSync(dirname(LOG_PATH), { recursive: true });
-  mkdirSync(INBOX_ROOT, { recursive: true });
+  const paths = getPaths();
+  mkdirSync(dirname(paths.LOG_PATH), { recursive: true });
+  mkdirSync(paths.INBOX_ROOT, { recursive: true });
 
-  log("INFO", `tg-poller starting (pid=${process.pid})`);
+  log("INFO", `tg-poller starting (pid=${process.pid})`, paths.LOG_PATH);
 
   // Lockfile — refuse to start if another poller is already alive. Two pollers
   // on the same bot race for getUpdates with HTTP 409, plus duplicate inbox
   // writes; cleaner to fail fast here.
-  const lock = acquireLock();
+  const lock = acquireLock(paths.LOCK_PATH);
   if (!lock.acquired) {
-    log("ERROR", `Lock acquisition failed: ${lock.reason}`);
+    log("ERROR", `Lock acquisition failed: ${lock.reason}`, paths.LOG_PATH);
     process.exit(2);
   }
 
   let token: string;
   try {
-    token = loadToken();
+    token = loadToken(paths.SECRETS_PATH);
   } catch (err) {
-    log("ERROR", (err as Error).message);
-    releaseLock();
+    log("ERROR", (err as Error).message, paths.LOG_PATH);
+    releaseLock(paths.LOCK_PATH);
     process.exit(1);
   }
-  const allowlist = loadAllowlist();
+  const allowlist = loadAllowlist(paths.ACCESS_PATH);
   log(
     "INFO",
     `Allowlist: ${allowlist.users.size} user(s), ${allowlist.groups.size} group(s)`,
+    paths.LOG_PATH,
   );
 
-  let lastUpdateId = loadLastUpdateId();
-  log("INFO", `Resuming from lastUpdateId=${lastUpdateId}`);
+  let lastUpdateId = loadLastUpdateId(paths.STATE_PATH);
+  log("INFO", `Resuming from lastUpdateId=${lastUpdateId}`, paths.LOG_PATH);
 
   let stopping = false;
   const onSignal = (signal: NodeJS.Signals) => {
-    log("INFO", `Received ${signal} — flushing state and exiting`);
+    log(
+      "INFO",
+      `Received ${signal} — flushing state and exiting`,
+      paths.LOG_PATH,
+    );
     try {
-      saveLastUpdateId(lastUpdateId);
+      saveLastUpdateId(paths.STATE_PATH, lastUpdateId);
     } catch (err) {
-      log("ERROR", `Failed to flush state on shutdown: ${(err as Error).message}`);
+      log(
+        "ERROR",
+        `Failed to flush state on shutdown: ${(err as Error).message}`,
+        paths.LOG_PATH,
+      );
     }
-    releaseLock();
+    releaseLock(paths.LOCK_PATH);
     stopping = true;
     process.exit(0);
   };
@@ -474,9 +548,11 @@ async function main(): Promise<void> {
   let backoffIdx = 0;
 
   while (!stopping) {
-    heartbeatLock(); // refresh ts on every iteration so a real poller never looks stale
-    log("DEBUG", `Polling getUpdates offset=${lastUpdateId + 1}`);
-    const result = await pollOnce(token, lastUpdateId + 1);
+    heartbeatLock(paths.LOCK_PATH); // refresh ts on every iteration
+    log("DEBUG", `Polling getUpdates offset=${lastUpdateId + 1}`, paths.LOG_PATH);
+    const result = await pollOnce(token, lastUpdateId + 1, {
+      logPath: paths.LOG_PATH,
+    });
 
     if (result.status === "auth") {
       await sleep(BACKOFF_CONFLICT_MS);
@@ -488,8 +564,8 @@ async function main(): Promise<void> {
     }
     if (result.status === "error") {
       const wait =
-        BACKOFF_GENERAL_MS[Math.min(backoffIdx, BACKOFF_GENERAL_MS.length - 1)];
-      log("DEBUG", `Backoff ${wait}ms (idx=${backoffIdx})`);
+        BACKOFF_GENERAL_MS[Math.min(backoffIdx, BACKOFF_GENERAL_MS.length - 1)]!;
+      log("DEBUG", `Backoff ${wait}ms (idx=${backoffIdx})`, paths.LOG_PATH);
       await sleep(wait);
       backoffIdx = Math.min(backoffIdx + 1, BACKOFF_GENERAL_MS.length - 1);
       continue;
@@ -501,11 +577,12 @@ async function main(): Promise<void> {
 
     let maxIdInBatch = lastUpdateId;
     for (const update of updates) {
-      const r = processUpdate(update, allowlist);
+      const r = processUpdate(update, allowlist, paths.INBOX_ROOT, paths.LOG_PATH);
       if (r.written && r.entry) {
         log(
           "INFO",
           `Wrote ${r.path} (chat=${r.entry.chat_id} msg=${r.entry.message_id} text="${r.entry.text.slice(0, 60).replace(/\n/g, " ")}")`,
+          paths.LOG_PATH,
         );
         notify(
           "Agent Mesh",
@@ -515,12 +592,13 @@ async function main(): Promise<void> {
       if (update.update_id > maxIdInBatch) maxIdInBatch = update.update_id;
     }
     try {
-      saveLastUpdateId(maxIdInBatch);
+      saveLastUpdateId(paths.STATE_PATH, maxIdInBatch);
       lastUpdateId = maxIdInBatch;
     } catch (err) {
       log(
         "ERROR",
         `Failed to persist lastUpdateId=${maxIdInBatch}: ${(err as Error).message}`,
+        paths.LOG_PATH,
       );
     }
   }
@@ -533,7 +611,8 @@ function sleep(ms: number): Promise<void> {
 if (import.meta.main) {
   main().catch((err) => {
     log("ERROR", `Fatal: ${(err as Error).stack ?? err}`);
-    releaseLock();
+    const paths = getPaths();
+    releaseLock(paths.LOCK_PATH);
     process.exit(1);
   });
 }

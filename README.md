@@ -44,10 +44,30 @@ Instead of agents prompt-passing inside one Claude Code session, each role gets 
 - **`scripts/tg-post.ts`** — outbound bot helper with dedup, chunking, 429 backoff, 30s request timeout.
 - **`scripts/start-pm.sh`** — PM session bootstrap. `nohup`-detaches the poller; survives shell exit.
 - **`scripts/smoke.sh`** — end-to-end setup verification (per-bot getMe, optional outbound test).
+- **`scripts/*.test.ts`** — bun:test unit + integration coverage of the poller + poster (75+ tests, all fetch traffic mocked).
 - **`agents/{pm,engineer,designer,researcher,tester,gtm}.md`** — six pre-written agent specs ready to drop into `.claude/agents/`.
 - **`docs/telegram-setup.md`** — BotFather walkthrough (15 min, ten ordered steps, common pitfalls).
 - **`secrets/bots.json.example` + `secrets/access.json.example`** — templates for the two secret files. Both real files are gitignored.
-- **`package.json`** — npm script aliases (`poller`, `post`, `start`, `smoke`).
+- **`package.json`** — npm script aliases (`poller`, `post`, `start`, `smoke`, `test`, `typecheck`).
+
+## Tests
+
+The poller and poster ship with `bun:test` coverage. All Telegram API calls
+are mocked at the `fetch` boundary — running the suite never hits the real
+network and never reads your real `secrets/bots.json` (tests use temp dirs
+via `AGENT_MESH_ROOT` / `AGENT_MESH_HOME`).
+
+```bash
+bun install     # installs bun-types + typescript
+bun test        # ~75 tests, runs in <3s
+bun run typecheck
+```
+
+What's covered:
+
+- **Poller** — atomic state writes, lockfile single-poller invariant + heartbeat staleness, allowlist filtering (group-by-chat, DM-by-user), inbox JSON shape, attachment extraction (photo/document/voice/audio/video), `pollOnce` HTTP differentiation (401 → auth, 409 → conflict, 5xx → retryable error, network throw → error).
+- **Poster** — `TOKEN_RE` shape validation, dedup key determinism, chunking on newline boundary + hard-limit fallback, `tgPost` end-to-end with mocked fetch (sendMessage payload shape, reply_to passthrough, dedup TTL, 5xx retry, 4xx hard-fail, 429 retry_after, `TG_POST_ENABLED=0` short-circuit, multi-chunk threading).
+- **Smoke script** — graceful failure paths (missing bots.json, placeholder tokens, malformed JSON).
 
 ## Why Telegram
 
