@@ -93,7 +93,7 @@ Issues, PRs, and feedback welcome.
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+MIT License — see [LICENSE](./LICENSE). USE AT YOUR OWN RISK; provided "as is" without warranty. Review source before installing.
 
 ---
 

@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Prashanth Nataraj
+#
+# USE AT YOUR OWN RISK. This script is provided "as is", without warranty of
+# any kind, express or implied, including but not limited to warranties of
+# merchantability, fitness for a particular purpose, or noninfringement.
+# In no event shall the authors or copyright holders be liable for any claim,
+# damages, or other liability arising from the use of this script.
+#
+# Review the full source before executing. Do not run as root unless required.
+
 # scripts/smoke.sh — end-to-end smoke test for the agent-mesh setup.
 #
 # Verifies:

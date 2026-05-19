@@ -1,4 +1,15 @@
 #!/usr/bin/env bun
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Prashanth Nataraj
+//
+// USE AT YOUR OWN RISK. This script is provided "as is", without warranty of
+// any kind, express or implied, including but not limited to warranties of
+// merchantability, fitness for a particular purpose, or noninfringement.
+// In no event shall the authors or copyright holders be liable for any claim,
+// damages, or other liability arising from the use of this script.
+//
+// Review the full source before executing. Do not run as root unless required.
+
 // scripts/tg-post.ts — outbound bot poster for the multi-agent-mesh
 //
 // Called from Bash by specialist subagents to post to a shared Telegram group.

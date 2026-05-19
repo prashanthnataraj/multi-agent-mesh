@@ -1,4 +1,15 @@
 #!/usr/bin/env bun
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Prashanth Nataraj
+//
+// USE AT YOUR OWN RISK. This script is provided "as is", without warranty of
+// any kind, express or implied, including but not limited to warranties of
+// merchantability, fitness for a particular purpose, or noninfringement.
+// In no event shall the authors or copyright holders be liable for any claim,
+// damages, or other liability arising from the use of this script.
+//
+// Review the full source before executing. Do not run as root unless required.
+
 // scripts/tg-poller.ts — always-on Telegram inbound poller
 //
 // Decouples inbound message reception from any Claude Code session lifecycle.
