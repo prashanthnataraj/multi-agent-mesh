@@ -5,7 +5,7 @@
 ## Install as a Claude Code Skill
 
 ```bash
-npx skills add prashanthnatraj/multi-agent-mesh
+npx skills add prashanthnataraj/multi-agent-mesh
 ```
 
 That fetches `SKILL.md` and the bundled assets into `~/.claude/skills/multi-agent-mesh/`. The Skill appears in your `/` slash menu next time you launch Claude Code.
@@ -13,7 +13,7 @@ That fetches `SKILL.md` and the bundled assets into `~/.claude/skills/multi-agen
 ## Or fork + clone manually
 
 ```bash
-git clone https://github.com/prashanthnatraj/multi-agent-mesh.git
+git clone https://github.com/prashanthnataraj/multi-agent-mesh.git
 cd multi-agent-mesh
 cp secrets/bots.json.example secrets/bots.json
 cp secrets/access.json.example secrets/access.json
@@ -97,4 +97,4 @@ MIT License — see [LICENSE](./LICENSE). USE AT YOUR OWN RISK; provided "as is"
 
 ---
 
-Built solo with AI, in NYC. — [Prashanth Nataraj](https://www.linkedin.com/in/prashanthnatraj/), founder of [Lume AI](https://getlumeai.com).
+Built solo with AI, in NYC. — [Prashanth Nataraj](https://www.linkedin.com/in/prashanth-nataraj/), founder of [Lume AI](https://getlumeai.com).
